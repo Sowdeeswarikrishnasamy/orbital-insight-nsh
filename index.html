@@ -1,0 +1,1213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>ORBITAL INSIGHT — Mission Control v2.0</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --void:#010609;
+  --panel:#040d14;
+  --panel2:#07131e;
+  --panel3:#0b1d2c;
+  --border:#0d2535;
+  --border-hi:#0f3d5a;
+  --cyan:#00d4ff;
+  --cyan2:#00a8d4;
+  --green:#00ff88;
+  --yellow:#ffd700;
+  --red:#ff2d3d;
+  --orange:#ff6b35;
+  --purple:#a855f7;
+  --text:#b8dce8;
+  --textdim:#3a6a7a;
+  --textmid:#6a9aaa;
+  --grid:rgba(0,160,220,0.05);
+  --safe:#00ff88;
+  --warn:#ffd700;
+  --crit:#ff2d3d;
+}
+html,body,#root{width:100%;height:100%;overflow:hidden;background:var(--void);}
+body{
+  font-family:'Rajdhani',sans-serif;
+  color:var(--text);
+  background:var(--void);
+  background-image:
+    radial-gradient(ellipse 100% 50% at 50% -5%,rgba(0,70,110,0.18) 0%,transparent 60%),
+    repeating-linear-gradient(0deg,var(--grid) 0,var(--grid) 1px,transparent 1px,transparent 48px),
+    repeating-linear-gradient(90deg,var(--grid) 0,var(--grid) 1px,transparent 1px,transparent 48px);
+}
+canvas{display:block;}
+select{background:var(--panel2);border:1px solid var(--border-hi);color:var(--cyan);
+  font-family:'Share Tech Mono',monospace;font-size:10px;padding:2px 6px;outline:none;cursor:pointer;}
+select option{background:#040d14;}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:4px;height:4px;}
+::-webkit-scrollbar-track{background:var(--panel);}
+::-webkit-scrollbar-thumb{background:var(--border-hi);border-radius:2px;}
+
+/* Keyframes */
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0.3}}
+@keyframes pulse-ring{0%{transform:scale(1);opacity:0.8}100%{transform:scale(2.2);opacity:0}}
+@keyframes scanline{0%{transform:translateY(-100%)}100%{transform:translateY(100vh)}}
+@keyframes ticker{0%{transform:translateX(100%)}100%{transform:translateX(-200%)}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+@keyframes glow-pulse{0%,100%{box-shadow:0 0 8px rgba(0,212,255,0.2)}50%{box-shadow:0 0 20px rgba(0,212,255,0.5)}}
+
+/* Scanline overlay */
+.scanline{
+  pointer-events:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.04) 2px,rgba(0,0,0,0.04) 4px);
+}
+.scanline::after{
+  content:'';position:absolute;top:0;left:0;right:0;height:80px;
+  background:linear-gradient(transparent,rgba(0,180,255,0.03),transparent);
+  animation:scanline 8s linear infinite;
+}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div class="scanline"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+// ================================================================
+// CONSTANTS & DATA GENERATION
+// ================================================================
+const NUM_SATS = 52;
+const NUM_DEBRIS = 10000;
+const PREFIXES = ['Alpha','Beta','Gamma','Delta','Echo','Foxtrot','Sierra','Tango','Kilo','Lima'];
+
+const SAT_NAMES = Array.from({length:NUM_SATS},(_,i)=>
+  `SAT-${PREFIXES[Math.floor(i/6)]}-${String(i+1).padStart(2,'0')}`
+);
+
+function initSatellites() {
+  return SAT_NAMES.map((name,i)=>({
+    id:name, idx:i,
+    inc:(20+(i%10)*14)*Math.PI/180,
+    raan:((i*37)%360)*Math.PI/180,
+    speed:360/(90+(i%5)*3),
+    phase:(i*47.3)%360,
+    fuel:20+Math.random()*75,
+    maxFuel:100,
+    status:i<47?'NOMINAL':i<51?'WARNING':'CRITICAL',
+    collisionsAvoided:Math.floor(Math.random()*9),
+    dvUsed:Math.random()*2.8,
+    temp:280+Math.random()*100,
+    power:60+Math.random()*40,
+    alt:400+i*8+(Math.random()-0.5)*50,
+  }));
+}
+
+function initDebris() {
+  return Array.from({length:NUM_DEBRIS},(_,i)=>({
+    id:`DEB-${90000+i}`,
+    lat:(Math.random()-0.5)*160,
+    lon:(Math.random()-0.5)*360,
+    alt:350+Math.random()*650,
+    vlat:(Math.random()-0.5)*0.4,
+    vlon:(Math.random()-0.5)*1.2,
+  }));
+}
+
+function initGantt(now) {
+  return SAT_NAMES.slice(0,8).map((name,i)=>{
+    const base = now-(30-i*4)*60000;
+    const future = now+(i*7+5)*60000;
+    const burns=[
+      {start:base,end:base+50000,type:'BURN',status:'past'},
+      {start:base+50000,end:base+650000,type:'COOLDOWN',status:'past'},
+    ];
+    if(i<5){
+      burns.push(
+        {start:future,end:future+55000,type:'BURN',status:i===0?'active':'future'},
+        {start:future+55000,end:future+655000,type:'COOLDOWN',status:'future'}
+      );
+    }
+    if(i===2){
+      burns.push({start:future-10000,end:future+80000,type:'CONFLICT',status:'conflict'});
+    }
+    return {sat:name,burns};
+  });
+}
+
+// Orbital math
+function getSatPos(sat, t) {
+  const phase = (sat.phase + sat.speed * t/60000) % 360;
+  const phRad = phase*Math.PI/180;
+  const sinLat = Math.sin(sat.inc)*Math.sin(phRad);
+  const lat = Math.asin(Math.max(-1,Math.min(1,sinLat)))*180/Math.PI;
+  const lon = (Math.atan2(Math.cos(sat.inc)*Math.sin(phRad),Math.cos(phRad))*180/Math.PI
+               +sat.raan*180/Math.PI+t/240000*360)%360;
+  return {lat, lon:((lon+540)%360)-180};
+}
+
+function llToMercator(lat,lon,W,H) {
+  const x=(lon+180)/360*W;
+  const latRad=lat*Math.PI/180;
+  const y=H/2-(Math.log(Math.tan(Math.PI/4+latRad/2))/Math.PI)*H*0.82;
+  return {x,y};
+}
+
+// Simplified continent outlines
+const CONTINENTS = [
+  [[-168,72],[-125,60],[-115,49],[-95,49],[-82,46],[-70,46],[-65,44],[-60,47],[-55,47],
+   [-60,45],[-65,42],[-70,42],[-72,40],[-80,25],[-88,16],[-83,10],[-77,8],[-80,5],
+   [-75,0],[-80,-5],[-105,20],[-109,22],[-114,28],[-117,32],[-120,37],[-124,37],
+   [-125,43],[-126,48],[-130,55],[-135,60],[-145,62],[-152,60],[-165,63],[-168,72]],
+  [[-80,12],[-72,12],[-62,10],[-60,8],[-52,4],[-50,0],[-48,-3],[-35,-8],[-35,-12],
+   [-38,-18],[-40,-22],[-43,-23],[-44,-28],[-50,-33],[-62,-38],[-65,-42],[-68,-55],
+   [-72,-50],[-75,-40],[-78,-30],[-80,-18],[-80,-10],[-80,0],[-78,8],[-80,12]],
+  [[-10,36],[5,36],[15,37],[25,37],[30,38],[35,37],[36,42],[28,42],[25,42],[22,44],
+   [22,48],[20,52],[18,55],[14,57],[10,58],[5,58],[-2,54],[-5,56],[-8,54],[-10,52],
+   [-10,44],[-10,36]],
+  [[-18,15],[10,15],[25,16],[38,16],[42,12],[42,10],[44,5],[42,0],[40,-5],[35,-10],
+   [32,-18],[28,-25],[22,-32],[18,-35],[12,-34],[5,-32],[0,-28],[-5,-15],[-12,-5],
+   [-18,5],[-18,15]],
+  [[25,37],[45,37],[55,40],[65,38],[75,35],[80,30],[85,27],[90,23],[98,18],[104,21],
+   [110,20],[116,22],[122,30],[125,35],[130,38],[136,36],[140,38],[140,45],[135,50],
+   [128,52],[120,55],[110,53],[100,55],[88,58],[78,58],[68,55],[58,55],[50,52],[42,48],
+   [36,45],[30,42],[25,37]],
+  [[115,-20],[130,-15],[138,-13],[142,-17],[148,-20],[152,-25],[150,-32],[146,-38],
+   [140,-38],[136,-35],[130,-33],[124,-32],[118,-26],[115,-22],[115,-20]],
+];
+
+// ================================================================
+// HOOKS
+// ================================================================
+function useAnimationLoop(callback) {
+  const rafRef = useRef();
+  const lastRef = useRef(0);
+  useEffect(()=>{
+    const loop = (ts) => {
+      callback(ts, ts-lastRef.current);
+      lastRef.current = ts;
+      rafRef.current = requestAnimationFrame(loop);
+    };
+    rafRef.current = requestAnimationFrame(loop);
+    return ()=>cancelAnimationFrame(rafRef.current);
+  },[callback]);
+}
+
+function useCanvasSize(ref) {
+  const [size,setSize] = useState({w:0,h:0});
+  useEffect(()=>{
+    const obs = new ResizeObserver(entries=>{
+      for(const e of entries){
+        const {width,height} = e.contentRect;
+        setSize({w:Math.floor(width),h:Math.floor(height)});
+      }
+    });
+    if(ref.current) obs.observe(ref.current);
+    return ()=>obs.disconnect();
+  },[ref]);
+  return size;
+}
+
+// ================================================================
+// SUB-COMPONENTS
+// ================================================================
+
+// Panel wrapper with sci-fi border
+function Panel({title,badge,children,className,style,extra}) {
+  return (
+    <div className={`panel ${className||''}`} style={{
+      background:'var(--panel)',
+      border:'1px solid var(--border)',
+      position:'relative',
+      overflow:'hidden',
+      display:'flex',flexDirection:'column',
+      ...style
+    }}>
+      {/* Corner decorations */}
+      {['tl','tr','bl','br'].map(c=>(
+        <span key={c} style={{
+          position:'absolute',
+          width:8,height:8,
+          borderColor:'var(--cyan)',borderStyle:'solid',
+          opacity:0.4,zIndex:2,
+          ...(c==='tl'?{top:0,left:0,borderWidth:'1px 0 0 1px'}:
+             c==='tr'?{top:0,right:0,borderWidth:'1px 1px 0 0'}:
+             c==='bl'?{bottom:0,left:0,borderWidth:'0 0 1px 1px'}:
+                      {bottom:0,right:0,borderWidth:'0 1px 1px 0'})
+        }}/>
+      ))}
+      {/* Top glow line */}
+      <div style={{position:'absolute',top:0,left:0,right:0,height:1,
+        background:'linear-gradient(90deg,transparent,var(--border-hi),transparent)',zIndex:1}}/>
+      {/* Header */}
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',
+        padding:'5px 12px',borderBottom:'1px solid var(--border)',
+        background:'rgba(0,15,25,0.7)',flexShrink:0}}>
+        <span style={{fontFamily:'Orbitron,monospace',fontSize:9,letterSpacing:3,
+          color:'var(--cyan)',textTransform:'uppercase'}}>{title}</span>
+        <div style={{display:'flex',gap:8,alignItems:'center'}}>
+          {extra}
+          {badge&&<span style={{fontFamily:'Share Tech Mono,monospace',fontSize:9,
+            padding:'2px 7px',background:'rgba(0,80,120,0.2)',
+            border:'1px solid var(--border-hi)',color:'var(--textdim)',letterSpacing:1}}>
+            {badge}
+          </span>}
+        </div>
+      </div>
+      <div style={{flex:1,position:'relative',overflow:'hidden'}}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// Status pill
+function Pill({label,type}) {
+  const colors={live:'#00ff88',warn:'#ffd700',crit:'#ff2d3d',info:'#00d4ff'};
+  const c=colors[type]||colors.info;
+  return (
+    <span style={{fontFamily:'Share Tech Mono,monospace',fontSize:9,padding:'2px 9px',
+      border:`1px solid ${c}`,color:c,letterSpacing:2,
+      animation:type==='live'?'blink 1.5s infinite':type==='crit'?'blink 0.7s infinite':'none'}}>
+      {type==='live'?'● ':type==='crit'?'● ':type==='warn'?'⚠ ':''}{label}
+    </span>
+  );
+}
+
+// ================================================================
+// GROUND TRACK CANVAS
+// ================================================================
+function GroundTrack({satellites,simTime,selectedSat}) {
+  const containerRef = useRef();
+  const canvasRef = useRef();
+  const size = useCanvasSize(containerRef);
+
+  const draw = useCallback(()=>{
+    const canvas = canvasRef.current;
+    if(!canvas||size.w===0) return;
+    canvas.width=size.w; canvas.height=size.h;
+    const ctx=canvas.getContext('2d');
+    const W=size.w,H=size.h;
+
+    // Background
+    ctx.fillStyle='#010a12';ctx.fillRect(0,0,W,H);
+
+    // Ocean texture - subtle noise dots
+    ctx.fillStyle='rgba(0,30,50,0.3)';
+    for(let i=0;i<200;i++){
+      ctx.beginPath();
+      ctx.arc(Math.random()*W,Math.random()*H,0.5,0,Math.PI*2);
+      ctx.fill();
+    }
+
+    // Grid lines
+    ctx.strokeStyle='rgba(0,120,170,0.1)';ctx.lineWidth=0.5;
+    for(let lon=-180;lon<=180;lon+=30){
+      const x=(lon+180)/360*W;
+      ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();
+    }
+    for(let lat=-90;lat<=90;lat+=30){
+      const {y}=llToMercator(lat,0,W,H);
+      ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();
+    }
+
+    // Terminator
+    const sunLon=((simTime/240000*360)%360+180)%360-180;
+    const sunX=(sunLon+180)/360*W;
+    ctx.fillStyle='rgba(0,3,12,0.6)';
+    ctx.fillRect(0,0,sunX,H);
+    const tg=ctx.createLinearGradient(sunX-60,0,sunX+60,0);
+    tg.addColorStop(0,'rgba(0,5,20,0.55)');
+    tg.addColorStop(0.45,'rgba(0,0,0,0)');
+    tg.addColorStop(0.55,'rgba(0,0,0,0)');
+    tg.addColorStop(1,'rgba(255,160,30,0.06)');
+    ctx.fillStyle=tg;ctx.fillRect(sunX-60,0,120,H);
+    // Terminator line
+    ctx.strokeStyle='rgba(255,190,60,0.65)';ctx.lineWidth=1.5;
+    ctx.setLineDash([4,5]);
+    ctx.beginPath();ctx.moveTo(sunX,0);ctx.lineTo(sunX,H);ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Continents
+    CONTINENTS.forEach(poly=>{
+      ctx.beginPath();
+      poly.forEach(([lon,lat],i)=>{
+        const p=llToMercator(lat,lon,W,H);
+        i===0?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y);
+      });
+      ctx.closePath();
+      ctx.fillStyle='rgba(12,35,52,0.9)';ctx.fill();
+      ctx.strokeStyle='rgba(0,140,190,0.22)';ctx.lineWidth=0.8;ctx.stroke();
+    });
+
+    // Grid labels
+    ctx.fillStyle='rgba(0,150,190,0.35)';ctx.font='7px Share Tech Mono';
+    [['60°N',60],['30°N',30],['0°',0],['30°S',-30],['60°S',-60]].forEach(([l,lat])=>{
+      const {y}=llToMercator(lat,0,W,H);ctx.fillText(l,4,y+3);
+    });
+    [-120,-60,0,60,120].forEach(lon=>{
+      const x=(lon+180)/360*W;
+      ctx.fillText(`${lon}°`,x+2,H-4);
+    });
+
+    // Satellites
+    satellites.forEach((sat,idx)=>{
+      const pos=getSatPos(sat,simTime);
+      const p=llToMercator(pos.lat,pos.lon,W,H);
+      const isSel=idx===selectedSat;
+
+      // Trail (past 90 min)
+      const trailSteps=isSel?80:40;
+      ctx.beginPath();
+      let prevP=null;
+      for(let s=trailSteps;s>=0;s--){
+        const tp=getSatPos(sat,simTime-s*67500);
+        const pp=llToMercator(tp.lat,tp.lon,W,H);
+        if(s===trailSteps){ctx.moveTo(pp.x,pp.y);prevP=pp;continue;}
+        if(prevP&&Math.abs(pp.x-prevP.x)<W*0.45){ctx.lineTo(pp.x,pp.y);}
+        else ctx.moveTo(pp.x,pp.y);
+        prevP=pp;
+      }
+      ctx.strokeStyle=isSel?'rgba(0,255,180,0.45)':'rgba(0,180,255,0.1)';
+      ctx.lineWidth=isSel?1.5:0.5;ctx.stroke();
+
+      // Predicted (next 90 min) for selected
+      if(isSel){
+        ctx.beginPath();prevP=null;
+        for(let s=0;s<=60;s++){
+          const tp=getSatPos(sat,simTime+s*90000);
+          const pp=llToMercator(tp.lat,tp.lon,W,H);
+          if(s===0){ctx.moveTo(pp.x,pp.y);prevP=pp;continue;}
+          if(prevP&&Math.abs(pp.x-prevP.x)<W*0.45)ctx.lineTo(pp.x,pp.y);
+          else ctx.moveTo(pp.x,pp.y);
+          prevP=pp;
+        }
+        ctx.strokeStyle='rgba(0,255,150,0.55)';ctx.lineWidth=1;
+        ctx.setLineDash([5,6]);ctx.stroke();ctx.setLineDash([]);
+      }
+
+      // Dot
+      const col=sat.status==='CRITICAL'?'#ff2d3d':sat.status==='WARNING'?'#ffd700':'#00d4ff';
+      if(isSel){
+        const pulse=(Math.sin(Date.now()/280)+1)/2;
+        ctx.beginPath();ctx.arc(p.x,p.y,9+pulse*5,0,Math.PI*2);
+        ctx.strokeStyle=col+'88';ctx.lineWidth=1;ctx.stroke();
+        ctx.beginPath();ctx.arc(p.x,p.y,5,0,Math.PI*2);
+        ctx.fillStyle=col;ctx.fill();
+        // Label
+        ctx.fillStyle='rgba(200,230,240,0.85)';ctx.font='bold 8px Share Tech Mono';
+        ctx.fillText(sat.id.slice(-8),p.x+8,p.y-4);
+      } else {
+        ctx.beginPath();ctx.arc(p.x,p.y,2.5,0,Math.PI*2);
+        ctx.fillStyle=col;ctx.globalAlpha=0.8;ctx.fill();ctx.globalAlpha=1;
+      }
+    });
+
+    // Sun marker
+    ctx.font='12px sans-serif';ctx.textAlign='center';
+    ctx.fillStyle='rgba(255,210,0,0.9)';
+    ctx.fillText('☀',sunX,14);
+  },[satellites,simTime,selectedSat,size]);
+
+  useEffect(()=>{draw();},[draw]);
+
+  return (
+    <div ref={containerRef} style={{width:'100%',height:'100%',position:'relative'}}>
+      <canvas ref={canvasRef}/>
+    </div>
+  );
+}
+
+// ================================================================
+// BULLSEYE CANVAS
+// ================================================================
+function Bullseye({satellites,debris,simTime,selectedSat}) {
+  const containerRef=useRef();
+  const canvasRef=useRef();
+  const size=useCanvasSize(containerRef);
+
+  const draw=useCallback(()=>{
+    const canvas=canvasRef.current;
+    if(!canvas||size.w===0) return;
+    canvas.width=size.w;canvas.height=size.h;
+    const ctx=canvas.getContext('2d');
+    const W=size.w,H=size.h;
+    const cx=W/2,cy=H/2;
+    const maxR=Math.min(cx,cy)*0.84;
+
+    ctx.fillStyle='#010b14';ctx.fillRect(0,0,W,H);
+
+    // Stars bg
+    ctx.fillStyle='rgba(180,210,240,0.3)';
+    for(let i=0;i<80;i++){
+      ctx.beginPath();ctx.arc(Math.random()*W,Math.random()*H,0.4,0,Math.PI*2);ctx.fill();
+    }
+
+    // Risk zones
+    const zones=[
+      {r:0.22,col:'rgba(255,45,61,0.12)',stroke:'rgba(255,45,61,0.5)',label:'CRITICAL < 1km',lCol:'#ff2d3d'},
+      {r:0.5,col:'rgba(255,215,0,0.07)',stroke:'rgba(255,215,0,0.4)',label:'WARNING < 5km',lCol:'#ffd700'},
+      {r:0.78,col:'rgba(0,180,255,0.04)',stroke:'rgba(0,130,180,0.2)',label:'CAUTION < 20km',lCol:'#00a8d4'},
+      {r:1.0,col:'rgba(0,0,0,0)',stroke:'rgba(0,80,110,0.15)',label:'50km+',lCol:'#3a6a7a'},
+    ];
+    zones.forEach(z=>{
+      ctx.beginPath();ctx.arc(cx,cy,z.r*maxR,0,Math.PI*2);
+      ctx.fillStyle=z.col;ctx.fill();
+      ctx.strokeStyle=z.stroke;ctx.lineWidth=z.r<0.5?1.2:0.7;ctx.stroke();
+      ctx.fillStyle=z.lCol;ctx.font='7px Share Tech Mono';
+      ctx.textAlign='left';ctx.fillText(z.label,cx+z.r*maxR+4,cy-3);
+    });
+
+    // Angle spokes
+    ctx.strokeStyle='rgba(0,130,180,0.12)';ctx.lineWidth=0.6;
+    for(let a=0;a<360;a+=45){
+      const r=a*Math.PI/180;
+      ctx.beginPath();
+      ctx.moveTo(cx+8*Math.cos(r),cy+8*Math.sin(r));
+      ctx.lineTo(cx+maxR*Math.cos(r),cy+maxR*Math.sin(r));
+      ctx.stroke();
+    }
+    // Cardinal labels
+    [['N',-Math.PI/2],['E',0],['S',Math.PI/2],['W',Math.PI],
+     ['NE',-Math.PI/4],['SE',Math.PI/4],['SW',3*Math.PI/4],['NW',-3*Math.PI/4]].forEach(([d,a])=>{
+      const rx=cx+(maxR+16)*Math.cos(a),ry=cy+(maxR+16)*Math.sin(a);
+      ctx.fillStyle='rgba(0,160,210,0.45)';ctx.font='8px Share Tech Mono';
+      ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.fillText(d,rx,ry);
+    });
+
+    // Debris objects
+    const sat=satellites[selectedSat];
+    const satPos=getSatPos(sat,simTime);
+    const nearDebris=[];
+    for(let i=0;i<18;i++){
+      const deb=debris[(selectedSat*53+i*137)%NUM_DEBRIS];
+      const dlat=deb.lat-satPos.lat+(Math.sin(simTime/4000+i)*0.08);
+      const dlon=deb.lon-satPos.lon+(Math.cos(simTime/3500+i)*0.12);
+      const distKm=Math.sqrt(dlat*dlat+dlon*dlon)*111;
+      nearDebris.push({id:deb.id,distKm,angle:Math.atan2(dlon,dlat),
+        tca:Math.abs(distKm*38+Math.sin(i+simTime/10000)*50)});
+    }
+    nearDebris.push({id:'DEB-99421',distKm:0.8,angle:0.65,tca:272});
+    nearDebris.push({id:'DEB-88103',distKm:3.4,angle:2.15,tca:730});
+    nearDebris.push({id:'DEB-77042',distKm:1.6,angle:-1.2,tca:510});
+    nearDebris.sort((a,b)=>a.distKm-b.distKm);
+
+    nearDebris.forEach(d=>{
+      const clamp=Math.min(d.distKm,50);
+      const norm=clamp/50;
+      const r=norm*maxR;
+      const px=cx+r*Math.cos(d.angle),py=cy+r*Math.sin(d.angle);
+      const col=d.distKm<1?'#ff2d3d':d.distKm<5?'#ffd700':'#00ff88';
+
+      // Approach line
+      ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(px,py);
+      ctx.strokeStyle=col+'20';ctx.lineWidth=0.5;ctx.stroke();
+
+      // Glow
+      const gr=ctx.createRadialGradient(px,py,0,px,py,8);
+      gr.addColorStop(0,col+'55');gr.addColorStop(1,'transparent');
+      ctx.fillStyle=gr;ctx.beginPath();ctx.arc(px,py,8,0,Math.PI*2);ctx.fill();
+
+      ctx.beginPath();ctx.arc(px,py,3.5,0,Math.PI*2);ctx.fillStyle=col;ctx.fill();
+
+      if(d.distKm<5){
+        const mins=Math.floor(d.tca/60),secs=Math.floor(d.tca%60);
+        ctx.fillStyle=col;ctx.font='7px Share Tech Mono';ctx.textAlign='left';
+        ctx.fillText(d.id.slice(-6),px+6,py-3);
+        ctx.fillText(`${d.distKm.toFixed(1)}km T-${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`,px+6,py+5);
+      }
+    });
+
+    // Center SAT
+    const pulse2=(Math.sin(Date.now()/260)+1)/2;
+    [18+pulse2*8,12,7].forEach((r,i)=>{
+      ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);
+      ctx.strokeStyle=i===0?`rgba(0,212,255,${0.3+pulse2*0.3})`:i===1?'rgba(0,212,255,0.6)':'#00d4ff';
+      ctx.lineWidth=i===2?2:1;
+      i===2?ctx.fill():(()=>{ctx.fillStyle='rgba(0,212,255,0.15)';ctx.fill();ctx.stroke();})();
+    });
+    // Crosshair
+    [[0,-14,0,-9],[0,9,0,14],[-14,0,-9,0],[9,0,14,0]].forEach(([x1,y1,x2,y2])=>{
+      ctx.beginPath();ctx.moveTo(cx+x1,cy+y1);ctx.lineTo(cx+x2,cy+y2);
+      ctx.strokeStyle='rgba(0,212,255,0.9)';ctx.lineWidth=1.5;ctx.stroke();
+    });
+
+    // SAT label
+    ctx.fillStyle='rgba(0,212,255,0.9)';ctx.font='bold 9px Share Tech Mono';
+    ctx.textAlign='center';ctx.fillText(sat.id,cx,cy-24);
+
+    // TCA summary
+    const critCount=nearDebris.filter(d=>d.distKm<1).length;
+    const warnCount=nearDebris.filter(d=>d.distKm>=1&&d.distKm<5).length;
+    ctx.fillStyle='rgba(0,120,170,0.7)';ctx.font='8px Share Tech Mono';
+    ctx.textAlign='left';ctx.fillText(`CRIT:${critCount}  WARN:${warnCount}  TOTAL:${nearDebris.length}`,8,H-8);
+  },[satellites,debris,simTime,selectedSat,size]);
+
+  useEffect(()=>{draw();},[draw]);
+
+  return (
+    <div ref={containerRef} style={{width:'100%',height:'100%'}}>
+      <canvas ref={canvasRef}/>
+    </div>
+  );
+}
+
+// ================================================================
+// FUEL GAUGES CANVAS
+// ================================================================
+function FuelGauges({satellites,selectedSat,onSelectSat}) {
+  const containerRef=useRef();
+  const canvasRef=useRef();
+  const size=useCanvasSize(containerRef);
+  const clickRef=useRef(null);
+
+  const draw=useCallback(()=>{
+    const canvas=canvasRef.current;
+    if(!canvas||size.w===0) return;
+    canvas.width=size.w;canvas.height=size.h;
+    const ctx=canvas.getContext('2d');
+    const W=size.w,H=size.h;
+    ctx.fillStyle='#010a12';ctx.fillRect(0,0,W,H);
+
+    const cols=Math.floor(W/40);
+    const rows=Math.ceil(NUM_SATS/cols);
+    const cellW=W/cols,cellH=H/rows;
+    clickRef.current={cols,cellW,cellH};
+
+    satellites.forEach((sat,i)=>{
+      const col=i%cols,row=Math.floor(i/cols);
+      const x=col*cellW,y=row*cellH;
+      const pad=2.5,bw=cellW-pad*2,bh=cellH-pad*2-10;
+
+      ctx.fillStyle='rgba(0,12,22,0.85)';
+      ctx.fillRect(x+pad,y+pad,bw,cellH-pad*2);
+
+      const pct=sat.fuel/sat.maxFuel;
+      const fuelH=bh*pct;
+      const fuelY=y+pad+bh-fuelH;
+
+      const fc=pct>0.55?'#00ff88':pct>0.28?'#ffd700':'#ff2d3d';
+      const rgb=pct>0.55?'0,255,136':pct>0.28?'255,215,0':'255,45,61';
+
+      const grad=ctx.createLinearGradient(0,fuelY,0,fuelY+fuelH);
+      grad.addColorStop(0,`rgba(${rgb},0.95)`);
+      grad.addColorStop(1,`rgba(${rgb},0.25)`);
+      ctx.fillStyle=grad;
+      ctx.fillRect(x+pad+1,fuelY,bw-2,fuelH);
+
+      // Tick marks
+      ctx.strokeStyle=`rgba(${rgb},0.15)`;ctx.lineWidth=0.5;
+      [0.25,0.5,0.75].forEach(t=>{
+        const ty=y+pad+bh*(1-t);
+        ctx.beginPath();ctx.moveTo(x+pad,ty);ctx.lineTo(x+pad+bw,ty);ctx.stroke();
+      });
+
+      ctx.strokeStyle=i===selectedSat?`rgba(0,212,255,0.9)`:`rgba(${rgb},0.4)`;
+      ctx.lineWidth=i===selectedSat?1.5:0.6;
+      ctx.strokeRect(x+pad,y+pad,bw,cellH-pad*2);
+
+      ctx.fillStyle=pct>0.2?'rgba(180,220,235,0.75)':'#ff2d3d';
+      ctx.font=`${Math.max(6,Math.min(bh*0.2,8))}px Share Tech Mono`;
+      ctx.textAlign='center';
+      ctx.fillText(Math.round(sat.fuel),x+cellW/2,y+pad+bh+8.5);
+
+      if(sat.status==='CRITICAL'){
+        const blink=(Math.sin(Date.now()/300)>0);
+        if(blink){
+          ctx.fillStyle='rgba(255,45,61,0.15)';
+          ctx.fillRect(x+pad,y+pad,bw,cellH-pad*2);
+        }
+      }
+    });
+    // Legend
+    ctx.fillStyle='rgba(0,150,190,0.35)';ctx.font='7px Share Tech Mono';
+    ctx.textAlign='left';
+    ctx.fillText(`FUEL (kg) | ${NUM_SATS} SATELLITES`,4,H-3);
+  },[satellites,selectedSat,size]);
+
+  useEffect(()=>{draw();},[draw]);
+
+  const handleClick=useCallback(e=>{
+    if(!clickRef.current) return;
+    const r=canvasRef.current.getBoundingClientRect();
+    const x=e.clientX-r.left,y=e.clientY-r.top;
+    const {cols,cellW,cellH}=clickRef.current;
+    const col=Math.floor(x/cellW),row=Math.floor(y/cellH);
+    const idx=row*cols+col;
+    if(idx>=0&&idx<NUM_SATS) onSelectSat(idx);
+  },[onSelectSat]);
+
+  return (
+    <div ref={containerRef} style={{width:'100%',height:'100%'}}>
+      <canvas ref={canvasRef} onClick={handleClick} style={{cursor:'pointer'}}/>
+    </div>
+  );
+}
+
+// ================================================================
+// DV EFFICIENCY CHART CANVAS
+// ================================================================
+function DVChart({satellites,selectedSat}) {
+  const containerRef=useRef();
+  const canvasRef=useRef();
+  const size=useCanvasSize(containerRef);
+
+  const draw=useCallback(()=>{
+    const canvas=canvasRef.current;
+    if(!canvas||size.w===0) return;
+    canvas.width=size.w;canvas.height=size.h;
+    const ctx=canvas.getContext('2d');
+    const W=size.w,H=size.h;
+    const pad={l:36,r:12,t:14,b:24};
+    const gW=W-pad.l-pad.r,gH=H-pad.t-pad.b;
+
+    ctx.fillStyle='#010a12';ctx.fillRect(0,0,W,H);
+
+    // Grid
+    ctx.strokeStyle='rgba(0,80,120,0.18)';ctx.lineWidth=0.5;
+    for(let i=0;i<=4;i++){
+      const y=pad.t+gH*(1-i/4),x=pad.l+gW*i/4;
+      ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(pad.l+gW,y);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(x,pad.t);ctx.lineTo(x,pad.t+gH);ctx.stroke();
+    }
+
+    // Axes
+    ctx.strokeStyle='rgba(0,180,240,0.5)';ctx.lineWidth=1.2;
+    ctx.beginPath();
+    ctx.moveTo(pad.l,pad.t);ctx.lineTo(pad.l,pad.t+gH);ctx.lineTo(pad.l+gW,pad.t+gH);
+    ctx.stroke();
+
+    // Axis labels
+    ctx.fillStyle='rgba(0,160,210,0.5)';ctx.font='7px Share Tech Mono';
+    ctx.textAlign='center';ctx.fillText('ΔV Used (m/s)',pad.l+gW/2,H-2);
+    ctx.save();ctx.translate(9,pad.t+gH/2);ctx.rotate(-Math.PI/2);
+    ctx.fillText('Collisions Avoided',0,0);ctx.restore();
+    for(let i=0;i<=4;i++){
+      const val=(i/4*8).toFixed(0);
+      ctx.fillText(val,pad.l-2,pad.t+gH*(1-i/4)+3);
+      ctx.fillText((i/4*2.8).toFixed(1),pad.l+gW*i/4,pad.t+gH+8);
+    }
+
+    // Efficiency frontier
+    const efPts=[[0,0],[0.3,3.5],[0.8,5.5],[1.5,7],[2.8,8]];
+    ctx.beginPath();
+    efPts.forEach(([dv,ca],i)=>{
+      const x=pad.l+(dv/2.8)*gW,y=pad.t+gH-(ca/8)*gH;
+      i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+    });
+    ctx.strokeStyle='rgba(0,255,136,0.25)';ctx.lineWidth=1.2;
+    ctx.setLineDash([4,6]);ctx.stroke();ctx.setLineDash([]);
+    ctx.fillStyle='rgba(0,255,136,0.35)';ctx.font='7px Share Tech Mono';
+    ctx.textAlign='right';ctx.fillText('EFFICIENCY FRONTIER',pad.l+gW-2,pad.t+7);
+
+    // Points
+    satellites.forEach((sat,i)=>{
+      const x=pad.l+(sat.dvUsed/2.8)*gW;
+      const y=pad.t+gH-(sat.collisionsAvoided/8)*gH;
+      const pct=sat.fuel/sat.maxFuel;
+      const col=pct>0.55?'#00ff88':pct>0.28?'#ffd700':'#ff2d3d';
+      ctx.beginPath();ctx.arc(x,y,i===selectedSat?5.5:2.8,0,Math.PI*2);
+      ctx.fillStyle=col;ctx.globalAlpha=i===selectedSat?1:0.6;ctx.fill();ctx.globalAlpha=1;
+      if(i===selectedSat){
+        ctx.strokeStyle='#00d4ff';ctx.lineWidth=1.5;ctx.stroke();
+        ctx.fillStyle='rgba(0,212,255,0.85)';ctx.font='7px Share Tech Mono';
+        ctx.textAlign='left';ctx.fillText(sat.id.slice(-8),x+7,y+3);
+      }
+    });
+  },[satellites,selectedSat,size]);
+
+  useEffect(()=>{draw();},[draw]);
+
+  return (
+    <div ref={containerRef} style={{width:'100%',height:'100%'}}>
+      <canvas ref={canvasRef}/>
+    </div>
+  );
+}
+
+// ================================================================
+// GANTT CHART CANVAS
+// ================================================================
+function GanttChart({ganttData,simTime}) {
+  const containerRef=useRef();
+  const canvasRef=useRef();
+  const size=useCanvasSize(containerRef);
+
+  const draw=useCallback(()=>{
+    const canvas=canvasRef.current;
+    if(!canvas||size.w===0) return;
+    canvas.width=size.w;canvas.height=size.h;
+    const ctx=canvas.getContext('2d');
+    const W=size.w,H=size.h;
+    const labelW=88,headerH=16;
+    const rowH=(H-headerH)/ganttData.length;
+    const tRange=130*60*1000;
+    const tStart=simTime-50*60*1000,tEnd=tStart+tRange;
+
+    ctx.fillStyle='#010a12';ctx.fillRect(0,0,W,H);
+
+    // Header bg
+    ctx.fillStyle='rgba(0,20,35,0.8)';ctx.fillRect(0,0,W,headerH);
+    ctx.strokeStyle='rgba(0,80,120,0.3)';ctx.lineWidth=0.5;
+    ctx.beginPath();ctx.moveTo(0,headerH);ctx.lineTo(W,headerH);ctx.stroke();
+
+    // Time ticks
+    for(let t=tStart;t<=tEnd;t+=10*60*1000){
+      const x=labelW+(t-tStart)/tRange*(W-labelW);
+      ctx.strokeStyle='rgba(0,80,120,0.2)';ctx.lineWidth=0.5;
+      ctx.beginPath();ctx.moveTo(x,headerH);ctx.lineTo(x,H);ctx.stroke();
+      const mins=Math.round((t-simTime)/60000);
+      ctx.fillStyle='rgba(0,150,190,0.4)';ctx.font='7px Share Tech Mono';
+      ctx.textAlign='center';ctx.fillText(`${mins>0?'+':''}${mins}m`,x,headerH-3);
+    }
+
+    // Row backgrounds + labels
+    ganttData.forEach((row,ri)=>{
+      const y=headerH+ri*rowH;
+      ctx.fillStyle=ri%2===0?'rgba(0,8,16,0.5)':'rgba(0,12,22,0.5)';
+      ctx.fillRect(labelW,y,W-labelW,rowH-0.5);
+      ctx.fillStyle='rgba(0,160,200,0.65)';ctx.font='8px Share Tech Mono';
+      ctx.textAlign='right';ctx.textBaseline='middle';
+      ctx.fillText(row.sat.slice(-10),labelW-5,y+rowH/2);
+      ctx.textBaseline='alphabetic';
+      // Row divider
+      ctx.strokeStyle='rgba(0,40,60,0.4)';ctx.lineWidth=0.5;
+      ctx.beginPath();ctx.moveTo(0,y+rowH);ctx.lineTo(W,y+rowH);ctx.stroke();
+    });
+
+    // Label column separator
+    ctx.strokeStyle='rgba(0,100,140,0.4)';ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(labelW,0);ctx.lineTo(labelW,H);ctx.stroke();
+
+    // Burns
+    ganttData.forEach((row,ri)=>{
+      const y=headerH+ri*rowH;
+      row.burns.forEach(b=>{
+        const bx1=labelW+(b.start-tStart)/tRange*(W-labelW);
+        const bx2=labelW+(b.end-tStart)/tRange*(W-labelW);
+        const bw=bx2-bx1;
+        if(bx2<labelW||bx1>W) return;
+        const clampX=Math.max(bx1,labelW);
+        const clampW=Math.min(bx2,W)-clampX;
+        if(clampW<=0) return;
+        const barH=rowH*0.62,barY=y+rowH*0.19;
+
+        const configs={
+          BURN:{
+            past:['rgba(255,107,53,0.4)','rgba(255,107,53,0.55)'],
+            active:['rgba(255,107,53,0.7)','#ff6b35'],
+            future:['rgba(255,107,53,0.25)','rgba(255,107,53,0.6)'],
+          },
+          COOLDOWN:{
+            past:['rgba(0,70,110,0.3)','rgba(0,100,150,0.4)'],
+            active:['rgba(0,80,130,0.5)','rgba(0,150,200,0.6)'],
+            future:['rgba(0,60,100,0.25)','rgba(0,100,150,0.35)'],
+          },
+          CONFLICT:{
+            conflict:['rgba(255,45,61,0.25)','rgba(255,45,61,0.7)'],
+          }
+        };
+        const [fill,stroke]=(configs[b.type]||{})[b.status]||['rgba(100,100,100,0.2)','rgba(150,150,150,0.4)'];
+
+        ctx.fillStyle=fill;ctx.fillRect(clampX,barY,clampW,barH);
+        ctx.strokeStyle=stroke;ctx.lineWidth=b.status==='active'?1.8:0.8;
+        ctx.strokeRect(clampX,barY,clampW,barH);
+
+        if(b.status==='active'&&b.type==='BURN'){
+          const glowA=(Math.sin(Date.now()/180)+1)/2*0.35;
+          ctx.fillStyle=`rgba(255,107,53,${glowA})`;
+          ctx.fillRect(clampX-2,barY-2,clampW+4,barH+4);
+          // Animated shimmer
+          const shimX=clampX+(((Date.now()/500)%1)*clampW);
+          const sg=ctx.createLinearGradient(shimX-10,0,shimX+10,0);
+          sg.addColorStop(0,'transparent');sg.addColorStop(0.5,'rgba(255,180,100,0.4)');sg.addColorStop(1,'transparent');
+          ctx.fillStyle=sg;ctx.fillRect(clampX,barY,clampW,barH);
+        }
+
+        if(b.type==='CONFLICT'){
+          ctx.strokeStyle='rgba(255,45,61,0.7)';ctx.lineWidth=1;
+          ctx.setLineDash([3,3]);ctx.stroke();ctx.setLineDash([]);
+          ctx.fillStyle='rgba(255,45,61,0.8)';ctx.font='bold 7px Share Tech Mono';
+          ctx.textAlign='center';ctx.fillText('⚠ CONFLICT',clampX+clampW/2,barY+barH/2+3);
+        } else if(clampW>22){
+          const lbl=b.type==='BURN'?'BURN':b.type==='COOLDOWN'?'CDN':'ERR';
+          ctx.fillStyle=b.type==='BURN'?'rgba(255,140,80,0.9)':'rgba(0,160,200,0.7)';
+          ctx.font='7px Share Tech Mono';ctx.textAlign='left';
+          ctx.fillText(lbl,clampX+3,barY+barH/2+3);
+        }
+      });
+    });
+
+    // NOW line
+    const nowX=labelW+(simTime-tStart)/tRange*(W-labelW);
+    if(nowX>=labelW&&nowX<=W){
+      ctx.strokeStyle='rgba(0,212,255,0.8)';ctx.lineWidth=1.5;
+      ctx.setLineDash([2,4]);
+      ctx.beginPath();ctx.moveTo(nowX,0);ctx.lineTo(nowX,H);ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle='rgba(0,212,255,0.9)';ctx.font='bold 8px Share Tech Mono';
+      ctx.textAlign='center';ctx.fillText('NOW',nowX,headerH-4);
+      // Glow
+      const ng=ctx.createLinearGradient(nowX-8,0,nowX+8,0);
+      ng.addColorStop(0,'transparent');ng.addColorStop(0.5,'rgba(0,212,255,0.07)');ng.addColorStop(1,'transparent');
+      ctx.fillStyle=ng;ctx.fillRect(nowX-8,headerH,16,H-headerH);
+    }
+  },[ganttData,simTime,size]);
+
+  useEffect(()=>{draw();},[draw]);
+
+  return (
+    <div ref={containerRef} style={{width:'100%',height:'100%'}}>
+      <canvas ref={canvasRef}/>
+    </div>
+  );
+}
+
+// ================================================================
+// STAT CARD COMPONENT
+// ================================================================
+function StatCard({label,value,unit,color,blink}) {
+  return (
+    <div style={{textAlign:'center',padding:'0 12px',borderLeft:'1px solid var(--border)'}}>
+      <div style={{fontFamily:'Orbitron,monospace',fontSize:16,fontWeight:700,
+        color:color||'var(--cyan)',lineHeight:1,
+        animation:blink?'blink 1s infinite':'none',
+        textShadow:`0 0 12px ${color||'var(--cyan)'}66`}}>
+        {value}<span style={{fontSize:9,opacity:0.6,marginLeft:2}}>{unit}</span>
+      </div>
+      <div style={{fontFamily:'Share Tech Mono,monospace',fontSize:8,
+        color:'var(--textdim)',letterSpacing:1.5,marginTop:2}}>{label}</div>
+    </div>
+  );
+}
+
+// ================================================================
+// ALERT TICKER
+// ================================================================
+function AlertTicker({alerts}) {
+  return (
+    <div style={{height:20,background:'rgba(1,4,8,0.96)',borderTop:'1px solid var(--border)',
+      display:'flex',alignItems:'center',overflow:'hidden',flexShrink:0}}>
+      <div style={{padding:'0 10px',color:'var(--red)',fontFamily:'Share Tech Mono,monospace',
+        fontSize:9,letterSpacing:2,borderRight:'1px solid var(--red)',whiteSpace:'nowrap',
+        flexShrink:0,animation:'blink 1s infinite'}}>⚠ ALERTS</div>
+      <div style={{flex:1,overflow:'hidden',position:'relative',height:'100%'}}>
+        <div style={{
+          position:'absolute',whiteSpace:'nowrap',
+          fontFamily:'Share Tech Mono,monospace',fontSize:9,color:'var(--textdim)',
+          top:'50%',transform:'translateY(-50%)',
+          animation:'ticker 35s linear infinite',letterSpacing:1
+        }}>
+          {alerts.map((a,i)=>(
+            <span key={i} style={{color:a.color||'var(--textdim)',marginRight:60}}>
+              {a.icon} {a.text}
+            </span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ================================================================
+// MINI SATELLITE TABLE (right panel supplement)
+// ================================================================
+function SatelliteTable({satellites,selectedSat,onSelect}) {
+  const sorted=[...satellites].sort((a,b)=>{
+    const order={CRITICAL:0,WARNING:1,NOMINAL:2};
+    return (order[a.status]||2)-(order[b.status]||2);
+  }).slice(0,8);
+
+  return (
+    <div style={{height:'100%',overflow:'auto',padding:'4px 8px'}}>
+      {sorted.map((sat,i)=>{
+        const col=sat.status==='CRITICAL'?'var(--red)':sat.status==='WARNING'?'var(--yellow)':'var(--green)';
+        const pct=sat.fuel/sat.maxFuel;
+        return (
+          <div key={sat.id} onClick={()=>onSelect(sat.idx)}
+            style={{
+              display:'grid',gridTemplateColumns:'10px 1fr 50px 40px 40px',gap:6,
+              alignItems:'center',padding:'3px 4px',marginBottom:2,cursor:'pointer',
+              background:sat.idx===selectedSat?'rgba(0,80,130,0.2)':'rgba(0,10,20,0.3)',
+              border:`1px solid ${sat.idx===selectedSat?'rgba(0,180,255,0.4)':'var(--border)'}`,
+              borderRadius:1,
+              animation:'fadeIn 0.3s ease',animationDelay:`${i*40}ms`
+            }}>
+            <div style={{width:8,height:8,borderRadius:'50%',background:col,
+              boxShadow:`0 0 6px ${col}`,
+              animation:sat.status==='CRITICAL'?'blink 0.7s infinite':'none'}}/>
+            <span style={{fontFamily:'Share Tech Mono,monospace',fontSize:8,color:'var(--textmid)',
+              overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{sat.id.slice(-10)}</span>
+            {/* Mini fuel bar */}
+            <div style={{height:6,background:'rgba(0,20,35,0.8)',border:'1px solid rgba(0,60,90,0.5)',position:'relative'}}>
+              <div style={{position:'absolute',left:0,top:0,bottom:0,width:`${pct*100}%`,
+                background:pct>0.55?'var(--green)':pct>0.28?'var(--yellow)':'var(--red)',
+                opacity:0.8}}/>
+            </div>
+            <span style={{fontFamily:'Share Tech Mono,monospace',fontSize:7,
+              color:pct>0.55?'var(--green)':pct>0.28?'var(--yellow)':'var(--red)',
+              textAlign:'right'}}>{Math.round(sat.fuel)}kg</span>
+            <span style={{fontFamily:'Share Tech Mono,monospace',fontSize:7,
+              color:col,textAlign:'right'}}>{sat.status.slice(0,4)}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ================================================================
+// MAIN APP
+// ================================================================
+function App() {
+  const [satellites,setSatellites]=useState(()=>initSatellites());
+  const [debris]=useState(()=>initDebris());
+  const [ganttData,setGanttData]=useState(()=>initGantt(Date.now()));
+  const [simTime,setSimTime]=useState(Date.now());
+  const [selectedSat,setSelectedSat]=useState(0);
+  const [fps,setFps]=useState(60);
+  const [activeTab,setActiveTab]=useState('overview'); // overview | telemetry | gantt
+  const lastFpsRef=useRef(Date.now());
+  const frameCountRef=useRef(0);
+  const lastTimeRef=useRef(Date.now());
+
+  // Sim loop
+  useEffect(()=>{
+    let raf;
+    const loop=()=>{
+      const now=Date.now();
+      const dt=now-lastTimeRef.current;
+      lastTimeRef.current=now;
+      setSimTime(t=>t+dt);
+      frameCountRef.current++;
+      if(now-lastFpsRef.current>1000){
+        setFps(Math.round(frameCountRef.current*1000/(now-lastFpsRef.current)));
+        frameCountRef.current=0;lastFpsRef.current=now;
+      }
+      // Slowly drain fuel
+      if(Math.random()<0.006){
+        setSatellites(prev=>{
+          const next=[...prev];
+          const idx=Math.floor(Math.random()*NUM_SATS);
+          next[idx]={...next[idx],fuel:Math.max(0,next[idx].fuel-Math.random()*0.3)};
+          return next;
+        });
+      }
+      raf=requestAnimationFrame(loop);
+    };
+    raf=requestAnimationFrame(loop);
+    return()=>cancelAnimationFrame(raf);
+  },[]);
+
+  const alerts=useMemo(()=>[
+    {text:'DEB-99421 → SAT-Alpha-04 | TCA: 04:32 | MISS: 0.8km | CRITICAL',color:'var(--red)',icon:'⚠'},
+    {text:'DEB-88103 → SAT-Delta-11 | TCA: 12:10 | MISS: 3.2km | WARNING',color:'var(--yellow)',icon:'⚠'},
+    {text:'MANEUVER SAT-Gamma-07 COMPLETE | ΔV: 0.42 m/s | COOLDOWN: 480s',color:'var(--green)',icon:'✓'},
+    {text:'SAT-Echo-02 ENTERING ECLIPSE ZONE | ETA: 02:11 | BATTERY MODE',color:'var(--yellow)',icon:'⚠'},
+    {text:'SNAPSHOT SYNC COMPLETE | 10,240 DEBRIS OBJECTS | LATENCY: 11ms',color:'var(--textdim)',icon:'●'},
+    {text:'DEB-77042 → SAT-Alpha-04 | TCA: 08:30 | MISS: 1.6km | WARNING',color:'var(--yellow)',icon:'⚠'},
+    {text:'SAT-Kilo-01 FUEL CRITICAL: 8.3kg REMAINING | MANEUVER BUDGET EXCEEDED',color:'var(--red)',icon:'⚠'},
+  ],[]);
+
+  const nomCount=satellites.filter(s=>s.status==='NOMINAL').length;
+  const warnCount=satellites.filter(s=>s.status==='WARNING').length;
+  const critCount=satellites.filter(s=>s.status==='CRITICAL').length;
+  const avgFuel=(satellites.reduce((s,x)=>s+x.fuel,0)/NUM_SATS).toFixed(1);
+
+  const pad2=n=>String(n).padStart(2,'0');
+  const d=new Date(simTime);
+  const clockStr=`${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())} UTC`;
+
+  return (
+    <div style={{width:'100%',height:'100vh',display:'flex',flexDirection:'column',overflow:'hidden'}}>
+      {/* ====== HEADER ====== */}
+      <header style={{
+        display:'flex',alignItems:'center',justifyContent:'space-between',
+        padding:'0 16px',height:48,flexShrink:0,
+        background:'linear-gradient(90deg,rgba(1,8,15,0.97) 0%,rgba(0,22,38,0.7) 50%,rgba(1,8,15,0.97) 100%)',
+        borderBottom:'1px solid var(--border-hi)',
+        boxShadow:'0 0 30px rgba(0,160,220,0.06)',
+        position:'relative'
+      }}>
+        <div style={{position:'absolute',bottom:0,left:0,right:0,height:1,
+          background:'linear-gradient(90deg,transparent,var(--cyan),transparent)',opacity:0.3}}/>
+
+        {/* Logo */}
+        <div style={{display:'flex',alignItems:'center',gap:14}}>
+          <div style={{fontFamily:'Orbitron,monospace',fontSize:20,fontWeight:900,
+            color:'var(--cyan)',letterSpacing:5,
+            textShadow:'0 0 25px rgba(0,212,255,0.55)'}}>
+            ORBITAL<span style={{color:'var(--textdim)',fontWeight:400}}>INSIGHT</span>
+          </div>
+          <div style={{borderLeft:'1px solid var(--border-hi)',paddingLeft:14,
+            fontFamily:'Share Tech Mono,monospace',fontSize:9,color:'var(--textdim)',
+            letterSpacing:2,lineHeight:1.5}}>
+            MISSION CONTROL<br/>
+            <span style={{color:'var(--textmid)'}}>NSH 2026 · v2.0</span>
+          </div>
+        </div>
+
+        {/* Center: status + clock */}
+        <div style={{display:'flex',gap:10,alignItems:'center'}}>
+          <Pill label="LIVE" type="live"/>
+          <div style={{fontFamily:'Share Tech Mono,monospace',fontSize:13,
+            color:'var(--cyan)',letterSpacing:2,
+            textShadow:'0 0 10px rgba(0,212,255,0.4)'}}>{clockStr}</div>
+          {critCount>0&&<Pill label={`${critCount} CRITICAL`} type="crit"/>}
+          {warnCount>0&&<Pill label={`${warnCount} WARNINGS`} type="warn"/>}
+        </div>
+
+        {/* Right stats */}
+        <div style={{display:'flex',alignItems:'center'}}>
+          <StatCard label="ACTIVE SATS" value={NUM_SATS} color="var(--cyan)"/>
+          <StatCard label="NOMINAL" value={nomCount} color="var(--green)"/>
+          <StatCard label="DEBRIS OBJ" value="10,240" color="var(--cyan)"/>
+          <StatCard label="AVG FUEL" value={avgFuel} unit="kg" color={parseFloat(avgFuel)>40?'var(--green)':'var(--yellow)'}/>
+          <StatCard label="FPS" value={fps} color={fps>=55?'var(--green)':fps>=30?'var(--yellow)':'var(--red)'}
+            blink={fps<30}/>
+        </div>
+      </header>
+
+      {/* ====== TAB BAR ====== */}
+      <div style={{display:'flex',gap:0,background:'rgba(0,8,15,0.9)',
+        borderBottom:'1px solid var(--border)',flexShrink:0}}>
+        {[
+          {id:'overview',label:'⊕ OVERVIEW'},
+          {id:'telemetry',label:'◈ TELEMETRY'},
+          {id:'gantt',label:'▶ MANEUVERS'},
+        ].map(tab=>(
+          <button key={tab.id} onClick={()=>setActiveTab(tab.id)}
+            style={{
+              background:activeTab===tab.id?'rgba(0,80,130,0.3)':'transparent',
+              border:'none',borderBottom:activeTab===tab.id?'2px solid var(--cyan)':'2px solid transparent',
+              color:activeTab===tab.id?'var(--cyan)':'var(--textdim)',
+              fontFamily:'Orbitron,monospace',fontSize:9,letterSpacing:2,
+              padding:'8px 20px',cursor:'pointer',transition:'all 0.2s',
+              textShadow:activeTab===tab.id?'0 0 10px rgba(0,212,255,0.4)':'none'
+            }}>
+            {tab.label}
+          </button>
+        ))}
+        {/* Satellite selector */}
+        <div style={{marginLeft:'auto',display:'flex',alignItems:'center',gap:8,padding:'0 16px'}}>
+          <span style={{fontFamily:'Share Tech Mono,monospace',fontSize:9,color:'var(--textdim)',letterSpacing:1}}>
+            FOCUS SAT:
+          </span>
+          <select value={selectedSat} onChange={e=>setSelectedSat(parseInt(e.target.value))}>
+            {SAT_NAMES.map((n,i)=><option key={i} value={i}>{n}</option>)}
+          </select>
+          <div style={{width:8,height:8,borderRadius:'50%',
+            background:satellites[selectedSat]?.status==='CRITICAL'?'var(--red)':
+                       satellites[selectedSat]?.status==='WARNING'?'var(--yellow)':'var(--green)',
+            boxShadow:`0 0 8px ${satellites[selectedSat]?.status==='CRITICAL'?'var(--red)':
+                       satellites[selectedSat]?.status==='WARNING'?'var(--yellow)':'var(--green)'}`}}/>
+        </div>
+      </div>
+
+      {/* ====== MAIN CONTENT ====== */}
+      <div style={{flex:1,overflow:'hidden',position:'relative'}}>
+
+        {/* ---- OVERVIEW TAB ---- */}
+        {activeTab==='overview'&&(
+          <div style={{
+            display:'grid',
+            gridTemplateColumns:'1fr 300px',
+            gridTemplateRows:'1fr 1fr',
+            gap:6,padding:6,
+            height:'100%',
+          }}>
+            {/* Ground Track */}
+            <Panel title="⊕ Ground Track — Mercator Projection"
+              badge="REAL-TIME · TERMINATOR ACTIVE"
+              style={{gridColumn:'1',gridRow:'1 / 3'}}>
+              <GroundTrack satellites={satellites} simTime={simTime} selectedSat={selectedSat}/>
+            </Panel>
+
+            {/* Bullseye */}
+            <Panel title="◎ Conjunction Bullseye"
+              badge="POLAR · TCA VIEW"
+              style={{gridColumn:'2',gridRow:'1'}}>
+              <Bullseye satellites={satellites} debris={debris} simTime={simTime} selectedSat={selectedSat}/>
+            </Panel>
+
+            {/* Satellite status table */}
+            <Panel title="◈ Fleet Status — Priority Sort"
+              badge="TOP 8 · RISK ORDERED"
+              style={{gridColumn:'2',gridRow:'2'}}>
+              <SatelliteTable satellites={satellites} selectedSat={selectedSat} onSelect={setSelectedSat}/>
+            </Panel>
+          </div>
+        )}
+
+        {/* ---- TELEMETRY TAB ---- */}
+        {activeTab==='telemetry'&&(
+          <div style={{
+            display:'grid',
+            gridTemplateColumns:'1fr 1fr',
+            gridTemplateRows:'1fr',
+            gap:6,padding:6,
+            height:'100%',
+          }}>
+            <Panel title="◈ Fuel Reserves — m_fuel (kg)"
+              badge={`${NUM_SATS} SATELLITES · CLICK TO SELECT`}>
+              <FuelGauges satellites={satellites} selectedSat={selectedSat} onSelectSat={setSelectedSat}/>
+            </Panel>
+            <Panel title="◈ ΔV Efficiency — Fuel Consumed vs Collisions Avoided"
+              badge="SCATTER · PARETO FRONTIER">
+              <DVChart satellites={satellites} selectedSat={selectedSat}/>
+            </Panel>
+          </div>
+        )}
+
+        {/* ---- GANTT TAB ---- */}
+        {activeTab==='gantt'&&(
+          <div style={{display:'grid',gridTemplateRows:'1fr',gap:6,padding:6,height:'100%'}}>
+            <Panel title="▶ Maneuver Timeline — Gantt Scheduler"
+              badge="600s COOLDOWN ENFORCED · CONFLICT DETECTION">
+              {/* Legend */}
+              <div style={{display:'flex',gap:16,padding:'5px 12px',
+                borderBottom:'1px solid var(--border)',flexShrink:0,
+                background:'rgba(0,10,20,0.5)'}}>
+                {[
+                  {col:'#ff6b35',label:'BURN'},
+                  {col:'rgba(0,140,200,0.6)',label:'COOLDOWN (600s)'},
+                  {col:'#ff2d3d',label:'CONFLICT'},
+                  {col:'rgba(0,212,255,0.8)',label:'NOW'},
+                ].map(({col,label})=>(
+                  <div key={label} style={{display:'flex',alignItems:'center',gap:5}}>
+                    <div style={{width:20,height:8,background:col,border:`1px solid ${col}`,opacity:0.9}}/>
+                    <span style={{fontFamily:'Share Tech Mono,monospace',fontSize:8,
+                      color:'var(--textdim)',letterSpacing:1}}>{label}</span>
+                  </div>
+                ))}
+              </div>
+              <div style={{flex:1,overflow:'hidden'}}>
+                <GanttChart ganttData={ganttData} simTime={simTime}/>
+              </div>
+            </Panel>
+          </div>
+        )}
+
+      </div>
+
+      {/* ====== TICKER ====== */}
+      <AlertTicker alerts={alerts}/>
+    </div>
+  );
+}
+
+// ================================================================
+// RENDER
+// ================================================================
+const root=ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App/>);
+</script>
+</body>
+</html>
